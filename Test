@@ -1,0 +1,110 @@
+npm init -y
+npm install puppeteer mongodb express axios dotenv
+touch .env
+
+MONGO_URI=mongodb://localhost:27017/web_scrape
+BATCH_SIZE=10 # Number of URLs processed simultaneously
+CONCURRENT_REQUESTS=5 # Maximum number of simultaneous requests
+WEBSITE_LIST_URL=https://example.com/websites.json # Replace with actual list of websites
+
+require('dotenv').config(); // Load environment variables from .env
+const express = require('express');
+const app = express();
+const port = 3000;
+app.use(express.json());
+
+// Middleware function to limit request rates
+function restrictConcurrency(req, res, next) {
+  const maxRequestsPerIp = parseInt(process.env.CONCURRENT_REQUESTS);
+  
+  if (!req.ip || req.ips.length === 0) return res.sendStatus(400);
+  
+  let currentReqCount = 0;
+  req.on('data', () => ++currentReqCount);
+  req.on('end', async () => {
+    await sleep(1000 * (maxRequestsPerIp - currentReqCount));
+    next();
+  });
+}
+
+// Sleep utility function
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Routes
+app.post('/screenshot/:url', restrictConcurrency, async (req, res) => {
+  try {
+    const urlToScrape = req.params.url;
+    const result = await captureScreenAndExtractInfo(urlToScrape);
+    res.status(result.status).json(result);
+  } catch (err) {
+    console.error(`Error processing ${req.params.url}:`, err);
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
+
+app.listen(port, () => {
+  console.log(`Server listening on http://localhost:${port}`);
+});
+
+/**
+ * Capture a full-page screenshot and extract accessibility info.
+ * @param {string} url The URL to visit and gather data from
+ */
+async function captureScreenAndExtractInfo(url) {
+  const browser = await puppeteer.launch();
+  const page = await browser.newPage();
+
+  await page.goto(url, { waitUntil: 'networkidle2' });
+  const html = await page.content();
+  const screenshotBuffer = await page.screenshot();
+
+  // Extract accessibility tree, etc., and store results in database
+  // ...
+
+  await browser.close();
+
+  return { status: 200, payload: { html, screenshotBuffer } };
+}
+
+/**
+ * Fetch a list of websites and save them to memory as tasks
+ */
+async function fetchWebsiteList() {
+  const response = await axios.get(process.env.WEBSITE_LIST_URL);
+  return response.data;
+}
+
+/**
+ * Run scraper for given batch size and concurrency level
+ * @param {number} batchSize Batch size determines the number of tasks run sequentially
+ * @param {number} concurrency Concurrency level determines the maximum number of simultaneous requests
+ */
+async function startScraper(batchSize, concurrency) {
+  const websiteList = await fetchWebsiteList();
+  const batches = chunkArray(websiteList, batchSize);
+
+  for (let i = 0; i < batches.length; i++) {
+    const promises = [];
+
+    for (let j = 0; j < batches[i].length && j < concurrency; j++) {
+      promises.push(captureScreenAndExtractInfo(batches[i][j]));
+    }
+
+    await Promise.allSettled(promises);
+  }
+}
+
+/**
+ * Utility function to divide an array into chunks
+ * @param {any[]} arr Array to split into smaller arrays
+ * @param {number} chunkSize Size of subarrays
+ */
+function chunkArray(arr, chunkSize) {
+  return [...Array(Math.ceil(arr.length / chunkSize))].map((_, index) =>
+    arr.slice(index * chunkSize, (index + 1) * chunkSize)
+  );
+}
+
+startScraper(parseInt(process.env.BATCH_SIZE), parseInt(process.env.CONCURRENT_REQUESTS));
